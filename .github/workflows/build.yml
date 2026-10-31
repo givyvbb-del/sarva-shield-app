@@ -1,4 +1,4 @@
-name: Build APK
+name: Build SARVA-SHIELD APK
 
 on:
   push:
@@ -7,80 +7,80 @@ on:
 
 jobs:
   build:
+    name: Build Release APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout Code
+      - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
 
-      - name: Setup Flutter
+      - name: Set up Flutter SDK
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.6'
           channel: 'stable'
+          cache: true
 
-      - name: Rebuild Android Skeleton & Dependencies
+      - name: Auto-Locate Code, Generate Android Skeleton & Fix Permissions
+        id: prepare
         run: |
+          # 1. Locate pubspec.yaml and lib folder wherever they are
+          PUB_PATH=$(find . -name "pubspec.yaml" -not -path "*/.*" | head -n 1)
+          APP_DIR=$(dirname "$PUB_PATH")
+          echo "Found Flutter project in: $APP_DIR"
+          echo "app_dir=$APP_DIR" >> $GITHUB_OUTPUT
+
+          cd "$APP_DIR"
+
+          # 2. Backup main.dart and pubspec.yaml
           mkdir -p /tmp/backup
-          cp pubspec.yaml /tmp/backup/pubspec.yaml
-          cp -r lib /tmp/backup/lib
+          cp pubspec.yaml /tmp/backup/
+          cp -r lib /tmp/backup/
+
+          # 3. Generate fresh Android folder if missing or broken
           flutter create --platforms=android --org com.tml.sarvashield .
+
+          # 4. Restore original code
           cp /tmp/backup/pubspec.yaml pubspec.yaml
           rm -rf lib
           cp -r /tmp/backup/lib lib
+
+          # 5. Inject Android 12+ Bluetooth, Location & SMS Permissions into AndroidManifest.xml
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i '/<manifest/a \
+          <uses-permission android:name="android.permission.INTERNET" />\
+          <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\
+          <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\
+          <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />\
+          <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />\
+          <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\
+          <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />\
+          <uses-permission android:name="android.permission.CALL_PHONE" />' "$MANIFEST"
+
+          # 6. Fetch packages
           flutter pub get
 
-      - name: Configure Manifest Permissions
+      - name: Patch flutter_bluetooth_serial Namespace (AGP 8+ Fix)
         run: |
-          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-              <uses-permission android:name="android.permission.VIBRATE"/>
+          find / -name "build.gradle" 2>/dev/null | grep "flutter_bluetooth_serial" | while read -r file; do
+            echo "Patching namespace in $file"
+            sed -i "/android {/a \    namespace 'io.github.edufolly.flutterbluetoothserial'" "$file"
+            sed -i "s/compileSdkVersion .*/compileSdkVersion 34/g" "$file"
+          done
 
-              <queries>
-                  <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent>
-                  <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="sms"/></intent>
-              </queries>
+      - name: Build Release APK
+        working-directory: ${{ steps.prepare.outputs.app_dir }}
+        run: flutter build apk --release
 
-              <application
-                  android:label="SARVA-SHIELD v5"
-                  android:name="${applicationName}"
-                  android:icon="@mipmap/ic_launcher">
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true"
-                      android:launchMode="singleTop"
-                      android:theme="@style/LaunchTheme"
-                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-                      android:hardwareAccelerated="true"
-                      android:windowSoftInputMode="adjustResize">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
-                      </intent-filter>
-                  </activity>
-                  <meta-data android:name="flutterEmbedding" android:value="2"/>
-              </application>
-          </manifest>
-          EOF
-
-      - name: Build APK
-        run: flutter build apk --release --no-tree-shake-icons
-
-      - name: Upload APK
+      - name: Upload Ready APK
         uses: actions/upload-artifact@v4
         with:
-          name: SARVA-SHIELD-v5-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: SARVA-SHIELD-v5-APK
+          path: ${{ steps.prepare.outputs.app_dir }}/build/app/outputs/flutter-apk/app-release.apk
